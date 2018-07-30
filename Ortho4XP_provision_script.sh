@@ -15,7 +15,8 @@ apt-get install -y python3 \
     python3-rtree \
     python3-pil \
     python3-pil.imagetk \
-    p7zip-full
+    p7zip-full \
+    libnvtt-bin
 
 # Comment this line below if you want to have headless Ubuntu
 apt-get install -y ubuntu-desktop
