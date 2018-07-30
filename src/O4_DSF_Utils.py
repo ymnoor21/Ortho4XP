@@ -1,4 +1,5 @@
 import os
+import pickle
 import shutil
 from math import floor, ceil
 import array
@@ -9,16 +10,14 @@ import struct
 import hashlib
 import O4_File_Names as FNAMES
 import O4_Geo_Utils as GEO
-import O4_OSM_Utils as OSM
-import O4_Vector_Utils as VECT
-import O4_Imagery_Utils as IMG
 import O4_Mask_Utils as MASK
 import O4_UI_Utils as UI
 
 quad_init_level=3
-quad_capacity=60000
+quad_capacity_high=50000
+quad_capacity_low=35000
 
-experimental_water_zl=12
+experimental_water_zl=14
 experimental_water_provider_code='SEA'
 
 ##############################################################################
@@ -76,7 +75,13 @@ class QuadTree(dict):
         else:
             self.split_bucket(key)
             self.insert(bx,by,level+1)
-
+    
+    def clean(self):
+        for key in list(self.keys()):
+            if not self[key]['size']:
+                del(self[key])
+                
+    
     def statistics(self):
         lengths=numpy.array([self[key]['size'] for key in self])
         depths=numpy.array([len(key[0]) for key in self])
@@ -95,17 +100,15 @@ def zone_list_to_ortho_dico(tile):
         airport_array=numpy.zeros((4096,4096),dtype=numpy.bool)
         if tile.cover_airports_with_highres:
             UI.vprint(1,"-> Checking airport locations for upgraded zoomlevel.")
-            airport_layer=OSM.OSM_layer()
-            queries=[('rel["aeroway"="runway"]','rel["aeroway"="taxiway"]','rel["aeroway"="apron"]',
-              'way["aeroway"="runway"]','way["aeroway"="taxiway"]','way["aeroway"="apron"]')]
-            tags_of_interest=["all"]
-            if not OSM.OSM_queries_to_OSM_layer(queries,airport_layer,tile.lat,tile.lon,tags_of_interest,cached_suffix='airports'): 
-                return 0
-            runway_network=OSM.OSM_to_MultiLineString(airport_layer,tile.lat,tile.lon)
-            runway_area=VECT.improved_buffer(runway_network,0.0003,0.0001,0.00001)
-            runway_area=VECT.ensure_MultiPolygon(runway_area)
-            for polygon in runway_area.geoms:
-                (xmin,ymin,xmax,ymax)=polygon.bounds
+            try:
+                f=open(FNAMES.apt_file(tile),'rb')
+                dico_airports=pickle.load(f)
+                f.close()
+            except:
+                UI.vprint(1,"   WARNING: File",FNAMES.apt_file(tile),"is missing (erased after Step 1?), cannot check airport info for upgraded zoomlevel.")
+                dico_airports={}
+            for airport in dico_airports:
+                (xmin,ymin,xmax,ymax)=dico_airports[airport]['boundary'].bounds
                 # extension
                 xmin-=1000*tile.cover_extent*GEO.m_to_lon(tile.lat)
                 xmax+=1000*tile.cover_extent*GEO.m_to_lon(tile.lat)
@@ -115,18 +118,16 @@ def zone_list_to_ortho_dico(tile):
                 (til_x_left,til_y_top)=GEO.wgs84_to_orthogrid(ymax+tile.lat,xmin+tile.lon,tile.cover_zl)
                 (ymax,xmin)=GEO.gtile_to_wgs84(til_x_left,til_y_top,tile.cover_zl)
                 ymax-=tile.lat; xmin-=tile.lon
-                (til_x_left,til_y_top)=GEO.wgs84_to_orthogrid(ymin+tile.lat,xmax+tile.lon,tile.cover_zl)
-                (ymin,xmax)=GEO.gtile_to_wgs84(til_x_left+16,til_y_top+16,tile.cover_zl)
+                (til_x_left2,til_y_top2)=GEO.wgs84_to_orthogrid(ymin+tile.lat,xmax+tile.lon,tile.cover_zl)
+                (ymin,xmax)=GEO.gtile_to_wgs84(til_x_left2+16,til_y_top2+16,tile.cover_zl)
                 ymin-=tile.lat; xmax-=tile.lon
+                xmin=max(0,xmin); xmax=min(1,xmax); ymin=max(0,ymin); ymax=min(1,ymax)
                 # mark to airport_array
                 colmin=round(xmin*4095)
                 colmax=round(xmax*4095)
                 rowmax=round((1-ymin)*4095)
                 rowmin=round((1-ymax)*4095)
                 airport_array[rowmin:rowmax+1,colmin:colmax+1]=1 
-            del(airport_layer)
-            del(runway_network) 
-            del(runway_area)
         dico_tmp={}
         dico_customzl={}
         i=1
@@ -163,20 +164,18 @@ def create_terrain_file(tile,texture_file_name,til_x_left,til_y_top,zoomlevel,pr
     ter_file_name=texture_file_name[:-4]+suffix+'.ter'
     with open(os.path.join(tile.build_dir,'terrain',ter_file_name),'w') as f:
         f.write('A\n800\nTERRAIN\n\n')
-        [lat_med,lon_med]=GEO.gtile_to_wgs84(til_x_left+4,til_y_top+4,zoomlevel)
-        texture_approx_size=GEO.webmercator_pixel_size(lat_med,zoomlevel)*4096
+        [lat_med,lon_med]=GEO.gtile_to_wgs84(til_x_left+8,til_y_top+8,zoomlevel)
+        texture_approx_size=int(GEO.webmercator_pixel_size(lat_med,zoomlevel)*4096)
         f.write('LOAD_CENTER '+'{:.5f}'.format(lat_med)+' '\
                +'{:.5f}'.format(lon_med)+' '\
                +str(texture_approx_size)+' 4096\n')
-        if tri_type in (1,2):
-            f.write('WET\n')
         f.write('BASE_TEX_NOWRAP ../textures/'+texture_file_name+'\n')
         if tri_type in (1,2) and not is_overlay: # experimental water
-            f.write('TEXTURE_NORMAL '+str(2**(17-zoomlevel))+' ../textures/water_normal_map.png\n')
+            f.write('TEXTURE_NORMAL '+str(2**(17-zoomlevel))+' ../textures/water_normal_map.dds\n')
             f.write('GLOBAL_specular 1.0\n')
             f.write('NORMAL_METALNESS\n')
-            if not os.path.exists(os.path.join(tile.build_dir,'textures','water_normal_map.png')):
-                shutil.copy(os.path.join(FNAMES.Utils_dir,'water_normal_map.png'),os.path.join(tile.build_dir,'textures'))
+            if not os.path.exists(os.path.join(tile.build_dir,'textures','water_normal_map.dds')):
+                shutil.copy(os.path.join(FNAMES.Utils_dir,'water_normal_map.dds'),os.path.join(tile.build_dir,'textures'))
         elif tri_type==1 or (tri_type==2 and is_overlay=='ratio_water'): #constant transparency level       
             f.write('BORDER_TEX ../textures/water_transition.png\n')
             if not os.path.exists(os.path.join(tile.build_dir,'textures','water_transition.png')):
@@ -185,11 +184,12 @@ def create_terrain_file(tile,texture_file_name,til_x_left,til_y_top,zoomlevel,pr
             f.write('LOAD_CENTER_BORDER '+'{:.5f}'.format(lat_med)+' '\
                +'{:.5f}'.format(lon_med)+' '+str(texture_approx_size)+' '+str(4096//2**(zoomlevel-tile.mask_zl))+'\n')
             f.write('BORDER_TEX ../textures/'+FNAMES.mask_file(til_x_left,til_y_top,zoomlevel,provider_code)+'\n')
-        else: #land
-            if tile.use_decal_on_terrain:
-                f.write('DECAL_LIB lib/g10/decals/maquify_1_green_key.dcl\n')
-            if not tile.terrain_casts_shadows:
-                f.write('NO_SHADOW\n')
+        elif tile.use_decal_on_terrain:
+            f.write('DECAL_LIB lib/g10/decals/maquify_1_green_key.dcl\n')
+        if tri_type in (1,2):
+            f.write('WET\n')
+        if tri_type in (1,2) or not tile.terrain_casts_shadows:
+            f.write('NO_SHADOW\n')
         return ter_file_name
 ##############################################################################
 
@@ -197,16 +197,22 @@ def create_terrain_file(tile,texture_file_name,til_x_left,til_y_top,zoomlevel,pr
 def build_dsf(tile,download_queue):
     dico_customzl=zone_list_to_ortho_dico(tile)
     dsf_file_name=os.path.join(tile.build_dir,'Earth nav data',FNAMES.long_latlon(tile.lat,tile.lon)+'.dsf')
-    print("-> Computing the pool quadtree") 
+    UI.vprint(1,"-> Computing the pool quadtree")
+    if tile.add_low_res_sea_ovl or tile.use_masks_for_inland:
+       quad_capacity=quad_capacity_low
+    else:
+       quad_capacity=quad_capacity_high
     pool_quadtree=QuadTree(quad_init_level,quad_capacity)
     f_mesh=open(FNAMES.mesh_file(tile.build_dir,tile.lat,tile.lon),"r")
-    for i in range(0,4):
+    mesh_version=float(f_mesh.readline().strip().split()[-1])
+    for i in range(3):
         f_mesh.readline()
     nbr_nodes=int(f_mesh.readline())
     node_coords=numpy.zeros(5*nbr_nodes,'float')
     for i in range(nbr_nodes):
         node_coords[5*i:5*i+3]=[float(x) for x in f_mesh.readline().split()[:3]]
         pool_quadtree.insert(float2qquad(node_coords[5*i]-tile.lon),float2qquad(node_coords[5*i+1]-tile.lat),quad_init_level)
+    pool_quadtree.clean()
     pool_quadtree.statistics()
     # 
     pool_nbr=len(pool_quadtree)
@@ -240,7 +246,7 @@ def build_dsf(tile,download_queue):
             scale_z=771   # 65535=771*85
             inv_stp=85
         elif altmax-altmin < 1284:
-            scale_z=1285  # 66535=1285*51
+            scale_z=1285  # 65535=1285*51
             inv_stp=51
         elif altmax-altmin < 4368:
             scale_z=4369  # 65535=4369*15
@@ -248,7 +254,7 @@ def build_dsf(tile,download_queue):
         else:
             scale_z=13107 # 65535=13107*5
             inv_stp=5
-        scal_x=scal_y=2**(-level)*65536/65535    
+        scal_x=scal_y=2**(-level)    
         node_icoords[[5*idx_node+2 for idx_node in plist]]=numpy.round((altitudes-altmin)*inv_stp)
         pool_param[key_to_idx_pool[key]]=(scal_x,tile.lon+int(key[0],2)*scal_x,scal_y,tile.lat+int(key[1],2)*scal_y,scale_z,altmin,2,-1,2,-1,1,0,1,0,1,0,1,0)
     node_icoords[3::5]=numpy.round((1+tile.normal_map_strength*node_coords[3::5])/2*65535)
@@ -284,6 +290,7 @@ def build_dsf(tile,download_queue):
     
     # Next, we go through the Triangle section of the mesh file and build DSF 
     # mesh points (these take into accound texture as well), point pools, etc. 
+    has_water = 7 if mesh_version>=1.3 else 3
     
     for i in range(0,2): # skip 2 lines
         f_mesh.readline()
@@ -299,10 +306,8 @@ def build_dsf(tile,download_queue):
         bary_lon=(node_coords[5*n1]+node_coords[5*n2]+node_coords[5*n3])/3
         bary_lat=(node_coords[5*n1+1]+node_coords[5*n2+1]+node_coords[5*n3+1])/3
         texture_attributes=dico_customzl[GEO.wgs84_to_orthogrid(bary_lat,bary_lon,tile.mesh_zl)]
-        # Triangles whith type>2 are set for type=0, and type 3 (water+sea in OSM) are set to 2 (sea) 
-        tri_type = (tri_type & 2) or (tri_type & 1)
-        # If use_masks_for_inland, turn type=1 tris to type=2
-        if tri_type and tile.use_masks_for_inland: tri_type=2
+        # Triangles of mixed types are set for water in priority (to avoid water cut by solid roads), and others are set for type=0 
+        tri_type = (tri_type & has_water) and (2*((tri_type & has_water)>1 or tile.use_masks_for_inland) or 1)
         # The entries for the terrain and texture main dictionnaries
         terrain_attributes=(texture_attributes,tri_type)
         # Do we need to build new terrain file(s) ?       
@@ -421,7 +426,8 @@ def build_dsf(tile,download_queue):
                     textured_tris[0]['cross-pool'].extend(tri_p)
             # II. Low resolution texture with global coverage        
             if tri_type==2 and ((tile.experimental_water & 2) or tile.add_low_res_sea_ovl): # experimental water over sea
-                sea_zl=int(IMG.providers_dict['SEA']['max_zl'])
+                #sea_zl=int(IMG.providers_dict['SEA']['max_zl'])
+                sea_zl=experimental_water_zl
                 (til_x_left,til_y_top)=GEO.wgs84_to_orthogrid(bary_lat,bary_lon,sea_zl)
                 texture_attributes=(til_x_left,til_y_top,sea_zl,'SEA')
                 terrain_attributes=(texture_attributes,tri_type)
@@ -436,9 +442,10 @@ def build_dsf(tile,download_queue):
                     texture_file_name=FNAMES.dds_file_name_from_attributes(*texture_attributes)
                     # do we need to download a new texture ?       
                     if texture_attributes not in treated_textures:
-                        download_queue.put(texture_attributes)
-                    else:
-                        UI.vprint(1,"   Texture file "+texture_file_name+" already present.")
+                        if not os.path.isfile(os.path.join(tile.build_dir,'textures',texture_file_name)):
+                            download_queue.put(texture_attributes)
+                        else:
+                            UI.vprint(1,"   Texture file "+texture_file_name+" already present.")
                         treated_textures.add(texture_attributes)
                     terrain_file_name=create_terrain_file(tile,texture_file_name,*texture_attributes,tri_type,is_overlay)
                     bTERT+=bytes('terrain/'+terrain_file_name+'\0','ascii') 
@@ -503,7 +510,7 @@ def build_dsf(tile,download_queue):
             size_of_geod_atom+=21+dsf_pool_plane[k]*(9+2*dsf_pool_length[k])
     UI.vprint(2,"     Size of DEFN atom : "+str(size_of_defn_atom)+" bytes.")    
     UI.vprint(2,"     Size of GEOD atom : "+str(size_of_geod_atom)+" bytes.")    
-    f=open(dsf_file_name,'wb')
+    f=open(dsf_file_name+'.tmp','wb')
     f.write(b'XPLNEDSF')
     f.write(struct.pack('<I',1))
     
@@ -592,7 +599,7 @@ def build_dsf(tile,download_queue):
             else:
                 size_of_cmds_atom+= 13+2*(len(textured_tris[terrain_idx][idx_dsfpool])+\
                         ceil(len(textured_tris[terrain_idx][idx_dsfpool])/510))
-    UI.vprint(2,"    Size of CMDS atom : "+str(size_of_cmds_atom)+" bytes.")
+    UI.vprint(2,"     Size of CMDS atom : "+str(size_of_cmds_atom)+" bytes.")
     f.write(b'SDMC')                               # CMDS header 
     f.write(struct.pack('<I',size_of_cmds_atom))   # CMDS length
     f.write(bCMDS)
@@ -655,13 +662,13 @@ def build_dsf(tile,download_queue):
     if UI.red_flag: UI.vprint(1,"DSF construction interrupted."); return 0   
     
     f.close()
-    f=open(dsf_file_name,'rb')
+    f=open(dsf_file_name+'.tmp','rb')
     data=f.read()
     m=hashlib.md5()
     m.update(data)
     md5sum=m.digest()
     f.close()
-    f=open(dsf_file_name,'ab')
+    f=open(dsf_file_name+'.tmp','ab')
     f.write(md5sum)
     f.close()
     UI.progress_bar(1,100)
