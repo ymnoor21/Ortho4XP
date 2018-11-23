@@ -17,7 +17,7 @@ def createWindowsShortcutDirectory(path, target='', workDir='', icon=''):
 if __name__ == "__main__":
 	dir_path = os.path.dirname(os.path.realpath(__file__))
 	tiles_dir = '\\Tiles'
-	xplane_directory = "D:\\X-Plane 11"
+	xplane_directory = "E:\\X-Plane 11"
 	custom_scenary = xplane_directory + "\\Custom Scenery"
 
 	tiles_dir_path = dir_path + tiles_dir
